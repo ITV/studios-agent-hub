@@ -1,0 +1,70 @@
+name: Auto Sync Upstream Releases
+
+on:
+  schedule:
+    - cron: '0 6 * * *' # Runs daily at 06:00 UTC
+  workflow_dispatch: # Allows manual trigger anytime from Actions tab
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch Upstream Tags & Create Sync PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_URL: "https://github.com/open-webui/open-webui.git"
+        run: |
+          # 1. Setup upstream remote to fetch ONLY tags
+          git remote add upstream "$UPSTREAM_URL"
+          git config remote.upstream.fetch "+refs/tags/*:refs/tags/*"
+          git fetch upstream
+
+          # 2. Get latest upstream tag matching version pattern (e.g., v1.2.0)
+          LATEST_TAG=$(git tag -l "v*" | sort -V | tail -n 1)
+
+          if [ -z "$LATEST_TAG" ]; then
+            echo "No matching upstream tags found."
+            exit 0
+          fi
+
+          echo "Latest upstream tag: $LATEST_TAG"
+
+          MY_TAG="itv-$LATEST_TAG"
+          BRANCH_NAME="sync/$LATEST_TAG"
+
+          # 3. Skip if we already deployed this tag or if a sync branch/PR exists
+          if git rev-parse "$MY_TAG" >/dev/null 2>&1; then
+            echo "Tag $MY_TAG already exists in fork. Skipping."
+            exit 0
+          fi
+
+          if git ls-remote --heads origin "$BRANCH_NAME" | grep -q "$BRANCH_NAME"; then
+            echo "Branch $BRANCH_NAME already exists on remote. Skipping."
+            exit 0
+          fi
+
+          # 4. Create sync branch off main and merge tag
+          git checkout -b "$BRANCH_NAME" main
+          git merge "$LATEST_TAG" -m "sync: merge upstream $LATEST_TAG"
+          git push origin "$BRANCH_NAME"
+
+          # 5. Open Pull Request via GitHub CLI
+          gh pr create \
+            --title "sync: upstream release $LATEST_TAG" \
+            --body "Automated PR bringing upstream release \`$LATEST_TAG\` into \`main\`." \
+            --head "$BRANCH_NAME" \
+            --base "main"
